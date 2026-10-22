@@ -19,6 +19,8 @@
  *   ANTHROPIC_MODEL     default claude-sonnet-4-20250514
  */
 
+const crypto = require("crypto");
+
 const BASE_URL = process.env.NEXUSAI_BASE_URL;
 const WORKER_KEY = process.env.WORKER_API_KEY;
 const POLL_MS = parseInt(process.env.POLL_INTERVAL_MS || "15000", 10);
@@ -139,6 +141,57 @@ function htmlToText(html) {
 
 const SYSTEM = "You are a worker agent inside the NexusAI platform. Follow the user's bot instructions carefully. Be concise and useful. You produce results for the app owner to review; you never send, pay, post, or delete anything yourself.";
 
+
+/* ---------------- Monitor state (stored in this repo) ---------------- */
+
+const STATE_API = process.env.STATE_API_BASE || "https://api.github.com";
+
+function stateRepo() {
+  return process.env.GITHUB_REPOSITORY || null;
+}
+
+async function loadMonitorState() {
+  const repo = stateRepo();
+  if (!repo || !process.env.GITHUB_TOKEN) return {};
+  try {
+    const res = await fetch(`${STATE_API}/repos/${repo}/contents/state/pages.json`, {
+      headers: {
+        Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+        "User-Agent": "NexusAI-Worker",
+        Accept: "application/vnd.github.raw+json",
+      },
+    });
+    if (res.status === 404) return {};
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return JSON.parse(await res.text());
+  } catch (e) {
+    log(`  (monitor state unavailable: ${e.message})`);
+    return {};
+  }
+}
+
+async function saveMonitorState(state) {
+  const repo = stateRepo();
+  if (!repo || !process.env.GITHUB_TOKEN) return false;
+  const api = `${STATE_API}/repos/${repo}/contents/state/pages.json`;
+  try {
+    let sha;
+    const head = await fetch(api, { headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, "User-Agent": "NexusAI-Worker" } });
+    if (head.ok) sha = (await head.json()).sha;
+    const body = JSON.stringify(state, null, 2);
+    const put = await fetch(api, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, "User-Agent": "NexusAI-Worker", "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "worker: update monitor state", content: Buffer.from(body).toString("base64"), sha }),
+    });
+    if (!put.ok) throw new Error(`HTTP ${put.status}: ${(await put.text()).slice(0, 200)}`);
+    return true;
+  } catch (e) {
+    log(`  (monitor state NOT saved: ${e.message})`);
+    return false;
+  }
+}
+
 const EXECUTORS = {
   async draft_reply(job) {
     const p = parsePayload(job);
@@ -167,7 +220,27 @@ const EXECUTORS = {
   },
 
   async monitor(job) {
-    return EXECUTORS.browse_page(job);
+    const p = parsePayload(job);
+    const url = p.url || p.prompt;
+    if (!/^https?:\/\//.test(String(url))) throw new Error(`Invalid URL: ${url}`);
+    log(`  fetching ${url}`);
+    const res = await fetch(url, { headers: { "User-Agent": "NexusAI-Worker/1.0" }, redirect: "follow" });
+    if (!res.ok) throw new Error(`fetch ${url} -> HTTP ${res.status}`);
+    const text = htmlToText(await res.text()).slice(0, 12000);
+    const hash = crypto.createHash("sha256").update(text).digest("hex");
+    const state = await loadMonitorState();
+    const prev = state[url];
+    state[url] = { hash, chars: text.length, seen_at: new Date().toISOString(), snippet: text.slice(0, 600) };
+    const changed = prev && prev.hash !== hash;
+    const saved = await saveMonitorState(state);
+    if (!prev) {
+      return `URL: ${url}\n\nBASELINE STORED — ${text.length} chars of page text snapshotted at ${state[url].seen_at}. Future checks will alert only when the page actually changes.${saved ? "" : "\n(Warning: state could not be saved — this snapshot is one-time only.)"}`;
+    }
+    if (!changed) {
+      return `URL: ${url}\n\nNO CHANGE since ${prev.seen_at} (${text.length} chars checked).`;
+    }
+    const summary = await llm(SYSTEM, `This page changed since ${prev.seen_at}. Compare previous vs current and list concisely what is new or different.\n\nPREVIOUS SNIPPET:\n${prev.snippet}\n\nCURRENT CONTENT:\n${text}`);
+    return `URL: ${url}\n\nCHANGED since ${prev.seen_at}:\n\n${summary}`;
   },
 
   async summarize(job) {
