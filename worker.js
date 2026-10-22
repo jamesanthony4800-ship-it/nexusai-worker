@@ -212,7 +212,21 @@ async function pollOnce() {
   );
 }
 
+const ONCE = process.argv.includes("--once");
+
 async function main() {
+  if (ONCE) {
+    // One-shot mode for GitHub Actions / cron hosting: claim what is queued, process it, exit.
+    log(`one-shot mode — claiming up to ${MAX_CONCURRENT} job(s), then exiting`);
+    try {
+      await pollOnce();
+      log("one-shot run complete");
+      process.exit(0);
+    } catch (err) {
+      console.error(`[fatal] one-shot run failed: ${err.message}`);
+      process.exit(1);
+    }
+  }
   log(`NexusAI worker ${WORKER_ID} starting — polling ${BASE_URL} every ${POLL_MS}ms`);
   // eslint-disable-next-line no-constant-condition
   while (true) {

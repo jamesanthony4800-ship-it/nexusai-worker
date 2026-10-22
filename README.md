@@ -85,3 +85,19 @@ off exponentially instead of hammering the API.
 
 This worker is the place where the real browser loop (screenshot → decide →
 click) will live later. Keep it deployed and upgrading is just a redeploy.
+
+## NEW: Run it free on GitHub Actions (no Railway needed)
+
+Since this repo is public, GitHub runs the worker for you on a 5-minute timer
+with **unlimited free minutes** — no separate hosting account at all.
+
+1. Make sure this file is in the repo: `.github/workflows/worker.yml`
+2. Repo → **Settings → Secrets and variables → Actions → New repository secret**, add:
+   - `NEXUSAI_BASE_URL` — your published NexusAI URL (no trailing slash)
+   - `WORKER_API_KEY` — same value as the NexusAI secret
+   - `XAI_API_KEY` — your Grok key (or `ANTHROPIC_API_KEY`)
+3. Repo → **Actions** tab → enable workflows if asked → **NexusAI worker** → **Run workflow** to test.
+4. After that it runs automatically every 5 minutes. Jobs usually complete within
+   5-10 minutes of being queued.
+
+Keep the repo public to keep the free unlimited minutes.
