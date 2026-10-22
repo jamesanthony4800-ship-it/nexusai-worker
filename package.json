@@ -1,0 +1,14 @@
+{
+  "name": "nexusai-worker",
+  "version": "1.0.0",
+  "description": "External always-on worker that polls the NexusAI job queue on Base44 and executes jobs",
+  "main": "worker.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node worker.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
