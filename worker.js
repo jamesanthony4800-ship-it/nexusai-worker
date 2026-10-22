@@ -162,6 +162,14 @@ const EXECUTORS = {
     return `URL: ${url}\n\n${summary}`;
   },
 
+  async browse(job) {
+    return EXECUTORS.browse_page(job);
+  },
+
+  async monitor(job) {
+    return EXECUTORS.browse_page(job);
+  },
+
   async summarize(job) {
     const p = parsePayload(job);
     return llm(SYSTEM, `Summarize the following:\n\n${p.text || p.prompt}`);
