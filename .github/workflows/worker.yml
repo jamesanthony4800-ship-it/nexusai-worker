@@ -1,9 +1,16 @@
 name: NexusAI worker
 
+# Runs the NexusAI job queue worker every 5 minutes, for free, on GitHub's servers.
+# Requires repository secrets (Settings -> Secrets and variables -> Actions):
+#   NEXUSAI_BASE_URL, WORKER_API_KEY, XAI_API_KEY (or ANTHROPIC_API_KEY)
+
 on:
   schedule:
     - cron: "*/5 * * * *"
-  workflow_dispatch:
+  workflow_dispatch: # allows manual "Run workflow" button for testing
+
+permissions:
+  contents: write # lets the worker save its monitor memory (state/pages.json) back to the repo
 
 jobs:
   work:
@@ -22,3 +29,4 @@ jobs:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MAX_CONCURRENT: 3
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
