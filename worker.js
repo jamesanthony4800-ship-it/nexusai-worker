@@ -4,7 +4,7 @@
  * An always-on service (Railway / Fly.io / any VPS) that polls the NexusAI
  * job queue on Base44, runs short jobs, and posts results back.
  *
- * Zero npm dependencies: Node.js 18+ (built-in fetch).
+ * Zero npm dependencies for all job types except "browser" (and render:true),\n * which needs Playwright installed on the host (npm install playwright).
  *
  * Required env:
  *   NEXUSAI_BASE_URL   e.g. https://your-nexusai-app.base44.app
@@ -192,6 +192,58 @@ async function saveMonitorState(state) {
   }
 }
 
+/* ---------------- Headless browser (Playwright, optional) ---------------- */
+
+let _pw = null;
+function playwright() {
+  if (_pw === null) {
+    try { _pw = require("playwright"); }
+    catch { _pw = false; }
+  }
+  return _pw || null;
+}
+
+const PW_TIMEOUT_MS = parseInt(process.env.PW_TIMEOUT_MS || "45000", 10);
+
+async function renderPageText(url) {
+  const pw = playwright();
+  if (!pw) throw new Error("playwright not installed on this host (run: npm install playwright && npx playwright install --with-deps chromium)");
+  let browser;
+  try {
+    log(`  rendering ${url} in headless Chromium`);
+    browser = await pw.chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+    const page = await (await browser.newContext({ userAgent: "NexusAI-Worker/1.0 (headless Chromium)" })).newPage();
+    const resp = await page.goto(url, { waitUntil: "networkidle", timeout: PW_TIMEOUT_MS });
+    if (resp && resp.status() >= 400) throw new Error(`render ${url} -> HTTP ${resp.status()}`);
+    await page.waitForTimeout(1200); // let late content settle
+    const text = (await page.evaluate(() => document.body.innerText)).replace(/\s+/g, " ").trim();
+    const title = await page.title();
+    return { text, title, rendered: true };
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
+async function fetchPageText(url) {
+  log(`  fetching ${url}`);
+  const res = await fetch(url, { headers: { "User-Agent": "NexusAI-Worker/1.0" }, redirect: "follow" });
+  if (!res.ok) throw new Error(`fetch ${url} -> HTTP ${res.status}`);
+  return { text: htmlToText(await res.text()), title: null, rendered: false };
+}
+
+// Shared entry: plain fetch by default; Playwright render when p.render is true
+// or the job type is "browser". Falls back to plain fetch if Playwright is
+// unavailable AND the job allows it (render flag) — never for explicit "browser" jobs.
+async function getPageText(url, opts = {}) {
+  const wantRender = opts.render === true || opts.force === true;
+  if (wantRender) {
+    if (playwright()) return renderPageText(url);
+    if (opts.force) throw new Error("playwright not installed on this host (needs a host with browser support)");
+    log("  playwright not available, falling back to plain fetch");
+  }
+  return fetchPageText(url);
+}
+
 const EXECUTORS = {
   async draft_reply(job) {
     const p = parsePayload(job);
@@ -207,12 +259,20 @@ const EXECUTORS = {
     const p = parsePayload(job);
     const url = p.url || p.prompt;
     if (!/^https?:\/\//.test(String(url))) throw new Error(`Invalid URL: ${url}`);
-    log(`  fetching ${url}`);
-    const res = await fetch(url, { headers: { "User-Agent": "NexusAI-Worker/1.0" }, redirect: "follow" });
-    if (!res.ok) throw new Error(`fetch ${url} -> HTTP ${res.status}`);
-    const text = htmlToText(await res.text()).slice(0, 12000);
-    const summary = await llm(SYSTEM, `Summarize this page content. Include the main points and anything actionable:\n\nURL: ${url}\n\nCONTENT:\n${text}`);
+    const { text } = await getPageText(url, { render: p.render === true });
+    const sliced = text.slice(0, 12000);
+    const summary = await llm(SYSTEM, `Summarize this page content. Include the main points and anything actionable:\n\nURL: ${url}\n\nCONTENT:\n${sliced}`);
     return `URL: ${url}\n\n${summary}`;
+  },
+
+  async browser(job) {
+    const p = parsePayload(job);
+    const url = p.url || p.prompt;
+    if (!/^https?:\/\//.test(String(url))) throw new Error(`Invalid URL: ${url}`);
+    const { text, title } = await getPageText(url, { force: true });
+    const sliced = text.slice(0, 12000);
+    const summary = await llm(SYSTEM, `This page was rendered in a real browser (JavaScript executed). Summarize the content, which may include dynamic/app-like elements. Include the main points and anything actionable:\n\nURL: ${url}${title ? `\nTitle: ${title}` : ""}\n\nCONTENT:\n${sliced}`);
+    return `URL: ${url} (rendered in headless browser)\n\n${summary}`;
   },
 
   async browse(job) {
@@ -223,10 +283,8 @@ const EXECUTORS = {
     const p = parsePayload(job);
     const url = p.url || p.prompt;
     if (!/^https?:\/\//.test(String(url))) throw new Error(`Invalid URL: ${url}`);
-    log(`  fetching ${url}`);
-    const res = await fetch(url, { headers: { "User-Agent": "NexusAI-Worker/1.0" }, redirect: "follow" });
-    if (!res.ok) throw new Error(`fetch ${url} -> HTTP ${res.status}`);
-    const text = htmlToText(await res.text()).slice(0, 12000);
+    const { text: rawText } = await getPageText(url, { render: p.render === true });
+    const text = rawText.slice(0, 12000);
     const hash = crypto.createHash("sha256").update(text).digest("hex");
     const state = await loadMonitorState();
     const prev = state[url];
