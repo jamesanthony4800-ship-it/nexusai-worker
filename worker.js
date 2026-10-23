@@ -1,5 +1,5 @@
 /**
- * NexusAI external worker — Phase 5
+ * NexusAI external worker — v6 (Railway-ready: health port, local state fallback)
  *
  * An always-on service (Railway / Fly.io / any VPS) that polls the NexusAI
  * job queue on Base44, runs short jobs, and posts results back.
@@ -20,6 +20,11 @@
  */
 
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+const http = require("http");
+
+const STATE_FILE = process.env.STATE_FILE || "/data/state/pages.json";
 
 const BASE_URL = process.env.NEXUSAI_BASE_URL;
 const WORKER_KEY = process.env.WORKER_API_KEY;
@@ -152,7 +157,14 @@ function stateRepo() {
 
 async function loadMonitorState() {
   const repo = stateRepo();
-  if (!repo || !process.env.GITHUB_TOKEN) return {};
+  if (!repo || !process.env.GITHUB_TOKEN) {
+    try {
+      return fs.existsSync(STATE_FILE) ? JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) : {};
+    } catch (e) {
+      log(`  (monitor state file unreadable: ${e.message})`);
+      return {};
+    }
+  }
   try {
     const res = await fetch(`${STATE_API}/repos/${repo}/contents/state/pages.json`, {
       headers: {
@@ -172,7 +184,16 @@ async function loadMonitorState() {
 
 async function saveMonitorState(state) {
   const repo = stateRepo();
-  if (!repo || !process.env.GITHUB_TOKEN) return false;
+  if (!repo || !process.env.GITHUB_TOKEN) {
+    try {
+      fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+      fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+      return true;
+    } catch (e) {
+      log(`  (monitor state NOT saved to ${STATE_FILE}: ${e.message})`);
+      return false;
+    }
+  }
   const api = `${STATE_API}/repos/${repo}/contents/state/pages.json`;
   try {
     let sha;
@@ -366,6 +387,11 @@ async function main() {
       process.exit(1);
     }
   }
+  const port = parseInt(process.env.PORT || "8080", 10);
+  http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, worker: WORKER_ID, uptime_s: Math.round(process.uptime()) }));
+  }).listen(port, "0.0.0.0", () => log(`health endpoint listening on :${port}`));
   log(`NexusAI worker ${WORKER_ID} starting — polling ${BASE_URL} every ${POLL_MS}ms`);
   // eslint-disable-next-line no-constant-condition
   while (true) {
